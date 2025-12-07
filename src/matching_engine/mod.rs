@@ -1,2 +1,2 @@
 pub mod orderbook;
-mod engine;
+pub mod engine;
