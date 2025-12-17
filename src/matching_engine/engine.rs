@@ -27,9 +27,11 @@ impl MachiningEngine {
         }
     }
 
+    //@TODO use enums/defining structs that includes enums and string
     pub fn add_new_market(&mut self, trading_pair: TradingPair) {
-        self.orderbooks.insert(trading_pair.clone(), Orderbook::new());
         println!("Added new market: {:?}", trading_pair.to_string());
+        self.orderbooks.insert(trading_pair, Orderbook::new());
+
     }
 
     pub fn place_limit_order(&mut self, pair: TradingPair, price: f64, order: Order) -> Result<(), String> {
