@@ -22,6 +22,7 @@ impl Orderbook {
     }
 
     pub fn fill_market_order(&mut self, marker_order: &mut Order) {
+        // return vec of matches
         let limits = match marker_order.bid_or_ask {
             BidOrAsk::Bid => self.ask_limits(),
             BidOrAsk::Ask => self.bid_limits(),
@@ -49,7 +50,7 @@ impl Orderbook {
         limits
     }
 
-    pub fn add_order(&mut self, price: Decimal, order: Order) {
+    pub fn add_limit_order(&mut self, price: Decimal, order: Order) {
         match order.bid_or_ask {
             BidOrAsk::Bid => match self.bids.get_mut(&price) {
                 Some(limit) => limit.add_order(order),
@@ -59,7 +60,14 @@ impl Orderbook {
                     self.bids.insert(price, limit);
                 }
             },
-            BidOrAsk::Ask => {}
+            BidOrAsk::Ask => match self.asks.get_mut(&price) {
+                Some(limit) => limit.add_order(order),
+                None => {
+                    let mut limit = Limit::new(price);
+                    limit.add_order(order);
+                    self.asks.insert(price, limit);
+                }
+            },
         }
     }
 }
@@ -129,6 +137,26 @@ impl Order {
 pub mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn orderbook_fill_market_order() {
+        let mut orderbook = Orderbook::new();
+        orderbook.add_limit_order(dec!(500), Order::new(BidOrAsk::Ask, 10.0));
+        orderbook.add_limit_order(dec!(200), Order::new(BidOrAsk::Ask, 10.0));
+        orderbook.add_limit_order(dec!(100), Order::new(BidOrAsk::Ask, 10.0));
+        orderbook.add_limit_order(dec!(300), Order::new(BidOrAsk::Ask, 10.0));
+
+        let mut market_order = Order::new(BidOrAsk::Bid, 10.0);
+        orderbook.fill_market_order(&mut market_order);
+
+        let ask_limits = orderbook.ask_limits();
+        let matched_limit = ask_limits.get(0).unwrap();
+        assert_eq!(matched_limit.price, dec!(100));
+        assert_eq!(market_order.is_filled(), true);
+
+        let matched_order = matched_limit.orders.get(0).unwrap();
+        assert_eq!(matched_order.is_filled(), true);
+    }
 
     #[test]
     fn limit_total_volume() {

@@ -38,7 +38,7 @@ impl MachiningEngine {
     pub fn place_limit_order(&mut self, pair: TradingPair, price: Decimal, order: Order) -> Result<(), String> {
         match self.orderbooks.get_mut(&pair) {
             Some(orderbook) => {
-                orderbook.add_order(price, order);
+                orderbook.add_limit_order(price, order);
                 println!("Placed new limit order: {:?}", price);
                 Ok(())
             }
