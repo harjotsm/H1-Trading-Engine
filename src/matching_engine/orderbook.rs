@@ -1,5 +1,6 @@
 use rust_decimal::prelude::*;
-use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub enum BidOrAsk {
@@ -9,15 +10,15 @@ pub enum BidOrAsk {
 
 #[derive(Debug)]
 pub struct Orderbook {
-    asks: HashMap<Decimal, Limit>,
-    bids: HashMap<Decimal, Limit>,
+    asks: BTreeMap<Decimal, Limit>,
+    bids: BTreeMap<Decimal, Limit>,
 }
 
 impl Orderbook {
     pub fn new() -> Orderbook {
         Orderbook {
-            asks: HashMap::new(),
-            bids: HashMap::new(),
+            asks: BTreeMap::new(),
+            bids: BTreeMap::new(),
         }
     }
 
@@ -75,14 +76,14 @@ impl Orderbook {
 #[derive(Debug)]
 pub struct Limit {
     price: Decimal,
-    orders: Vec<Order>,
+    orders: VecDeque<Order>,
 }
 
 impl Limit {
     pub fn new(price: Decimal) -> Limit {
         Limit {
             price,
-            orders: Vec::new(),
+            orders: VecDeque::new(),
         }
     }
 
@@ -113,7 +114,7 @@ impl Limit {
     }
 
     fn add_order(&mut self, order: Order) {
-        self.orders.push(order);
+        self.orders.push_back(order);
     }
 }
 
