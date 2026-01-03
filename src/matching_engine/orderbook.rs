@@ -1,17 +1,38 @@
-use rust_decimal::prelude::*;
-use std::collections::VecDeque;
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BidOrAsk {
     Bid,
     Ask,
 }
 
 #[derive(Debug)]
+pub enum MatchEvent {
+    Trade {
+        maker_id: u64,
+        taker_id: u64,
+        price: u64,
+        qty: u64,
+    },
+    Maker {
+        id: u64,
+        price: u64,
+        qty: u64,
+        side: BidOrAsk,
+    },
+}
+
+#[derive(Debug)]
+pub struct MatchResult {
+    pub events: Vec<MatchEvent>,
+}
+
+#[derive(Debug)]
 pub struct Orderbook {
-    asks: BTreeMap<Decimal, Limit>,
-    bids: BTreeMap<Decimal, Limit>,
+    asks: BTreeMap<u64, Limit>,
+    bids: BTreeMap<u64, Limit>,
+    next_order_id: u64,
 }
 
 impl Orderbook {
@@ -19,98 +40,119 @@ impl Orderbook {
         Orderbook {
             asks: BTreeMap::new(),
             bids: BTreeMap::new(),
+            next_order_id: 1,
         }
     }
 
-    pub fn fill_market_order(&mut self, marker_order: &mut Order) {
-        // return vec of matches
-        let limits = match marker_order.bid_or_ask {
-            BidOrAsk::Bid => self.ask_limits(),
-            BidOrAsk::Ask => self.bid_limits(),
-        };
+    pub fn execute_limit_order(&mut self, side: BidOrAsk, price: u64, mut qty: u64) -> MatchResult {
+        let taker_order_id = self.next_order_id;
+        self.next_order_id += 1;
 
-        for limit_order in limits {
-            limit_order.fill_order(marker_order);
-            if marker_order.is_filled() {
-                break;
+        let mut events = Vec::new();
+
+        match side {
+            BidOrAsk::Bid => {
+                for (ask_price, limit) in self.asks.iter_mut() {
+                    if *ask_price > price {
+                        break;
+                    }
+                    if qty == 0 {
+                        break;
+                    }
+
+                    let (matched, trade_events) = limit.fill(taker_order_id, qty);
+                    qty -= matched;
+                    events.extend(trade_events);
+                }
+            }
+            BidOrAsk::Ask => {
+                for (bid_price, limit) in self.bids.iter_mut().rev() {
+                    if *bid_price < price {
+                        break;
+                    }
+                    if qty == 0 {
+                        break;
+                    }
+
+                    let (matched, trade_events) = limit.fill(taker_order_id, qty);
+                    qty -= matched;
+                    events.extend(trade_events);
+                }
             }
         }
-    }
 
-    // BID => ASKS limits => sorted cheapest to expensive
-    pub fn ask_limits(&mut self) -> Vec<&mut Limit> {
-        let mut limits = self.asks.values_mut().collect::<Vec<&mut Limit>>();
-        limits.sort_by(|a, b| a.price.cmp(&b.price));
-        limits
-    }
+        if qty > 0 {
+            events.push(MatchEvent::Maker {
+                id: taker_order_id,
+                price,
+                qty,
+                side,
+            });
 
-    // ASK => BIDS limits => sorted expensive to cheapest
-    pub fn bid_limits(&mut self) -> Vec<&mut Limit> {
-        let mut limits = self.bids.values_mut().collect::<Vec<&mut Limit>>();
-        limits.sort_by(|a, b| b.price.cmp(&a.price));
-        limits
-    }
+            let order = Order {
+                id: taker_order_id,
+                size: qty,
+                bid_or_ask: side,
+            };
+            let target_map = match side {
+                BidOrAsk::Bid => &mut self.bids,
+                BidOrAsk::Ask => &mut self.asks,
+            };
 
-    pub fn add_limit_order(&mut self, price: Decimal, order: Order) {
-        match order.bid_or_ask {
-            BidOrAsk::Bid => match self.bids.get_mut(&price) {
-                Some(limit) => limit.add_order(order),
-                None => {
-                    let mut limit = Limit::new(price);
-                    limit.add_order(order);
-                    self.bids.insert(price, limit);
-                }
-            },
-            BidOrAsk::Ask => match self.asks.get_mut(&price) {
-                Some(limit) => limit.add_order(order),
-                None => {
-                    let mut limit = Limit::new(price);
-                    limit.add_order(order);
-                    self.asks.insert(price, limit);
-                }
-            },
+            target_map
+                .entry(price)
+                .or_insert_with(|| Limit::new(price))
+                .add_order(order);
         }
+
+        self.asks.retain(|_, l| !l.is_empty());
+        self.bids.retain(|_, l| !l.is_empty());
+
+        MatchResult { events }
     }
 }
 
 #[derive(Debug)]
 pub struct Limit {
-    price: Decimal,
+    price: u64,
     orders: VecDeque<Order>,
 }
 
 impl Limit {
-    pub fn new(price: Decimal) -> Limit {
+    pub fn new(price: u64) -> Limit {
         Limit {
             price,
             orders: VecDeque::new(),
         }
     }
 
-    fn total_volume(&self) -> f64 {
-        self.orders
-            .iter()
-            .map(|order| order.size)
-            .reduce(|a, b| a + b)
-            .unwrap()
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty()
     }
 
-    fn fill_order(&mut self, market_order: &mut Order) {
-        for limit_order in self.orders.iter_mut() {
-            match market_order.size >= limit_order.size {
-                true => {
-                    market_order.size -= limit_order.size;
-                    limit_order.size = 0.0;
-                }
-                false => {
-                    limit_order.size -= market_order.size;
-                    market_order.size = 0.0;
-                }
-            }
-            if market_order.is_filled() {
+    fn fill(&mut self, taker_id: u64, mut qty_to_fill: u64) -> (u64, Vec<MatchEvent>) {
+        let mut events = Vec::new();
+        let start_qty = qty_to_fill;
+
+        for book_order in self.orders.iter_mut() {
+            if qty_to_fill == 0 {
                 break;
             }
+
+            let match_amount = std::cmp::min(qty_to_fill, book_order.size);
+
+            book_order.size -= match_amount;
+            qty_to_fill -= match_amount;
+
+            events.push(MatchEvent::Trade {
+                maker_id: book_order.id,
+                taker_id: taker_id,
+                price: self.price,
+                qty: match_amount,
+            });
         }
+        self.orders.retain(|o| o.size > 0);
+        (start_qty - qty_to_fill, events)
     }
 
     fn add_order(&mut self, order: Order) {
@@ -120,90 +162,88 @@ impl Limit {
 
 #[derive(Debug)]
 pub(crate) struct Order {
-    size: f64,
-    bid_or_ask: BidOrAsk,
-}
-
-impl Order {
-    pub fn new(bid_or_ask: BidOrAsk, size: f64) -> Order {
-        Order { bid_or_ask, size }
-    }
-
-    pub fn is_filled(&self) -> bool {
-        self.size == 0.0
-    }
+    pub size: u64,
+    pub bid_or_ask: BidOrAsk,
+    pub id: u64,
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
 
     #[test]
-    fn orderbook_fill_market_order() {
-        let mut orderbook = Orderbook::new();
-        orderbook.add_limit_order(dec!(500), Order::new(BidOrAsk::Ask, 10.0));
-        orderbook.add_limit_order(dec!(200), Order::new(BidOrAsk::Ask, 10.0));
-        orderbook.add_limit_order(dec!(100), Order::new(BidOrAsk::Ask, 10.0));
-        orderbook.add_limit_order(dec!(300), Order::new(BidOrAsk::Ask, 10.0));
+    fn test_simple_match() {
+        let mut ob = Orderbook::new();
+        let res1 = ob.execute_limit_order(BidOrAsk::Ask, 10, 100);
+        assert!(matches!(res1.events[0], MatchEvent::Maker { .. }));
+        let res2 = ob.execute_limit_order(BidOrAsk::Bid, 10, 50);
 
-        let mut market_order = Order::new(BidOrAsk::Bid, 10.0);
-        orderbook.fill_market_order(&mut market_order);
-
-        let ask_limits = orderbook.ask_limits();
-        let matched_limit = ask_limits.get(0).unwrap();
-        assert_eq!(matched_limit.price, dec!(100));
-        assert_eq!(market_order.is_filled(), true);
-
-        let matched_order = matched_limit.orders.get(0).unwrap();
-        assert_eq!(matched_order.is_filled(), true);
+        match res2.events[0] {
+            MatchEvent::Trade {
+                qty,
+                price,
+                maker_id,
+                ..
+            } => {
+                assert_eq!(qty, 50);
+                assert_eq!(price, 10);
+                assert_eq!(maker_id, 1);
+            }
+            _ => panic!("Expected a Trade event!"),
+        }
+        let limit = ob.asks.get(&10).unwrap();
+        assert_eq!(limit.orders[0].size, 50);
     }
 
     #[test]
-    fn limit_total_volume() {
-        let price = dec!(10000.0);
-        let mut limit = Limit::new(price);
-        let buy_limit_order_a = Order::new(BidOrAsk::Bid, 100.0);
-        let buy_limit_order_b = Order::new(BidOrAsk::Bid, 100.0);
-        limit.add_order(buy_limit_order_a);
-        limit.add_order(buy_limit_order_b);
+    fn test_price_priority() {
+        let mut ob = Orderbook::new();
 
-        assert_eq!(limit.total_volume(), 200.0);
+        ob.execute_limit_order(BidOrAsk::Ask, 200, 100);
+        ob.execute_limit_order(BidOrAsk::Ask, 100, 100);
+
+        let res = ob.execute_limit_order(BidOrAsk::Bid, 200, 50);
+
+        match res.events[0] {
+            MatchEvent::Trade { price, .. } => {
+                assert_eq!(
+                    price, 100,
+                    "Engine chose the wrong price! Should be 100 (Best Execution)."
+                );
+            }
+            _ => panic!("No trade occurred"),
+        }
     }
 
     #[test]
-    fn limit_order_multiple_fill() {
-        let price = dec!(10000.0);
-        let mut limit = Limit::new(price);
-        let buy_limit_order_a = Order::new(BidOrAsk::Bid, 100.0);
-        let buy_limit_order_b = Order::new(BidOrAsk::Bid, 100.0);
-        limit.add_order(buy_limit_order_a);
-        limit.add_order(buy_limit_order_b);
+    fn test_time_priority() {
+        let mut ob = Orderbook::new();
+        let res_a = ob.execute_limit_order(BidOrAsk::Ask, 100, 10);
+        let id_a = if let MatchEvent::Maker { id, .. } = res_a.events[0] {
+            id
+        } else {
+            0
+        };
 
-        let mut market_sell_order = Order::new(BidOrAsk::Ask, 199.0);
-        limit.fill_order(&mut market_sell_order);
+        let res_b = ob.execute_limit_order(BidOrAsk::Ask, 100, 10);
+        let id_b = if let MatchEvent::Maker { id, .. } = res_b.events[0] {
+            id
+        } else {
+            0
+        };
 
-        //println!("{:?}", limit);
-        assert_eq!(market_sell_order.is_filled(), true);
-        assert_eq!(limit.orders.get(0).unwrap().is_filled(), true);
-        assert_eq!(limit.orders.get(1).unwrap().is_filled(), false);
-        assert_eq!(limit.orders.get(1).unwrap().size, 1.0);
+        assert!(id_a < id_b, "IDs should be sequential");
 
-        //println!("{:?}", limit);
-    }
+        let res_buy = ob.execute_limit_order(BidOrAsk::Bid, 100, 10);
 
-    #[test]
-    fn limit_order_single_fill() {
-        let price = dec!(10000.0);
-        let mut limit = Limit::new(price);
-        let buy_order = Order::new(BidOrAsk::Bid, 100.0);
-        limit.add_order(buy_order);
-
-        let mut market_sell_order = Order::new(BidOrAsk::Ask, 99.0);
-        limit.fill_order(&mut market_sell_order);
-
-        //println!("{:?}", limit);
-        //assert_eq!(market_sell_order.is_filled(), true);
-        //assert_eq!(limit.orders.get(0).unwrap().size, 1.0);
+        match res_buy.events[0] {
+            MatchEvent::Trade { maker_id, .. } => {
+                assert_eq!(
+                    maker_id, id_a,
+                    "Time Priority failed! Oldest order should match first."
+                );
+            }
+            _ => panic!("Expected Trade"),
+        }
     }
 }

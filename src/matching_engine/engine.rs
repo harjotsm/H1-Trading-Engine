@@ -1,6 +1,5 @@
-use super::orderbook::{Order, Orderbook};
+use super::orderbook::{BidOrAsk, MatchResult, Orderbook};
 use std::collections::HashMap;
-use rust_decimal::Decimal;
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct TradingPair {
@@ -17,34 +16,39 @@ impl TradingPair {
         format!("{}_{}", self.base, self.quote)
     }
 }
-pub struct MachiningEngine {
+
+pub struct MatchingEngine {
     orderbooks: HashMap<TradingPair, Orderbook>,
 }
 
-impl MachiningEngine {
-    pub fn new() -> MachiningEngine {
-        MachiningEngine {
+impl MatchingEngine {
+    pub fn new() -> MatchingEngine {
+        MatchingEngine {
             orderbooks: HashMap::new(),
         }
     }
 
-    //@TODO use enums/defining structs that includes enums and string
-    pub fn add_new_market(&mut self, trading_pair: TradingPair) {
-        println!("Added new market: {:?}", trading_pair.to_string());
-        self.orderbooks.insert(trading_pair, Orderbook::new());
-
+    pub fn add_new_market(&mut self, pair: TradingPair) {
+        println!("Added new market: {:?}", pair.to_string());
+        self.orderbooks.insert(pair, Orderbook::new());
     }
 
-    pub fn place_limit_order(&mut self, pair: TradingPair, price: Decimal, order: Order) -> Result<(), String> {
+    pub fn place_limit_order(
+        &mut self,
+        pair: TradingPair,
+        side: BidOrAsk,
+        price: u64,
+        qty: u64,
+    ) -> Result<MatchResult, String> {
         match self.orderbooks.get_mut(&pair) {
             Some(orderbook) => {
-                orderbook.add_limit_order(price, order);
-                println!("Placed new limit order: {:?}", price);
-                Ok(())
+                let result = orderbook.execute_limit_order(side, price, qty);
+                Ok(result)
             }
-            None => {
-                Err(format!("Trading pair {:?} not found", pair.to_string()))
-            }
+            None => Err(format!(
+                "Market {:?} does not exist. Create it first!",
+                pair.to_string()
+            )),
         }
     }
 }
