@@ -1,29 +1,32 @@
-mod matching_engine;
 use H1_Trading_Engine::matching_engine::engine::{MatchingEngine, TradingPair};
 use H1_Trading_Engine::matching_engine::orderbook::{BidOrAsk, MatchEvent};
 
 fn main() {
     let mut engine = MatchingEngine::new();
     let pair = TradingPair::new("BTC".to_string(), "USD".to_string());
-    engine.add_new_market(pair.clone());
 
-    println!("--- \u{1F680} TRADING ENGINE STARTED: BTC_USD ---\n");
+    let btc_usd_id = engine.add_new_market(pair);
+
+    println!(
+        "--- \u{1F680} TRADING ENGINE STARTED: BTC_USD (Market ID: {:?}) ---\n",
+        btc_usd_id
+    );
 
     println!("1. Alice places SELL Order (2 BTC @ $50,000)...");
     let res_alice = engine
-        .place_limit_order(pair.clone(), BidOrAsk::Ask, 50_000, 2)
+        .place_limit_order(btc_usd_id, BidOrAsk::Ask, 50_000, 2)
         .unwrap();
     print_events(res_alice.events);
 
     println!("\n2. Bob places BUY Order (1 BTC @ $50,000)...");
     let res_bob = engine
-        .place_limit_order(pair.clone(), BidOrAsk::Bid, 50_000, 1)
+        .place_limit_order(btc_usd_id, BidOrAsk::Bid, 50_000, 1)
         .unwrap();
     print_events(res_bob.events);
 
     println!("\n3. Charlie places BUY Order (2 BTC @ $50,000)...");
     let res_charlie = engine
-        .place_limit_order(pair.clone(), BidOrAsk::Bid, 50_000, 2)
+        .place_limit_order(btc_usd_id, BidOrAsk::Bid, 50_000, 2)
         .unwrap();
     print_events(res_charlie.events);
 }
