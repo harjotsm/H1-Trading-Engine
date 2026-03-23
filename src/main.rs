@@ -1,61 +1,134 @@
-use H1_Trading_Engine::matching_engine::engine::{MatchingEngine, TradingPair};
-use H1_Trading_Engine::matching_engine::orderbook::{BidOrAsk, MatchEvent};
+use std::collections::{BTreeMap, VecDeque};
 
-fn main() {
-    let mut engine = MatchingEngine::new();
-    let pair = TradingPair::new("BTC".to_string(), "USD".to_string());
+// Newtypes for Strict Typing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct Price(pub u64);
 
-    let btc_usd_id = engine.add_new_market(pair);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quantity(pub u64);
 
-    println!(
-        "--- \u{1F680} TRADING ENGINE STARTED: BTC_USD (Market ID: {:?}) ---\n",
-        btc_usd_id
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderId(pub u64);
 
-    println!("1. Alice places SELL Order (2 BTC @ $50,000)...");
-    let res_alice = engine
-        .place_limit_order(btc_usd_id, BidOrAsk::Ask, 50_000, 2)
-        .unwrap();
-    print_events(res_alice.events);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side { Bid, Ask }
 
-    println!("\n2. Bob places BUY Order (1 BTC @ $50,000)...");
-    let res_bob = engine
-        .place_limit_order(btc_usd_id, BidOrAsk::Bid, 50_000, 1)
-        .unwrap();
-    print_events(res_bob.events);
-
-    println!("\n3. Charlie places BUY Order (2 BTC @ $50,000)...");
-    let res_charlie = engine
-        .place_limit_order(btc_usd_id, BidOrAsk::Bid, 50_000, 2)
-        .unwrap();
-    print_events(res_charlie.events);
+#[derive(Debug)]
+pub enum MatchEvent {
+    Trade { maker_id: OrderId, taker_id: OrderId, price: Price, qty: Quantity },
+    Maker { id: OrderId, price: Price, qty: Quantity, side: Side },
 }
 
-fn print_events(events: Vec<MatchEvent>) {
-    for event in events {
-        match event {
-            MatchEvent::Trade {
-                maker_id,
-                taker_id,
-                price,
-                qty,
-            } => {
-                println!(
-                    "   \u{26A1} TRADE EXECUTED: Maker #{} sold to Taker #{} -> {} units @ ${}",
-                    maker_id, taker_id, qty, price
-                );
+#[derive(Debug)]
+pub struct Order { pub id: OrderId, pub size: Quantity, pub side: Side }
+
+// Orderbook Structures
+#[derive(Debug)]
+pub struct Limit {
+    price: Price,
+    orders: VecDeque<Order>,
+}
+
+impl Limit {
+    pub fn new(price: Price) -> Self { Self { price, orders: VecDeque::new() } }
+    pub fn is_empty(&self) -> bool { self.orders.is_empty() }
+
+    fn fill<F>(&mut self, taker_id: OrderId, mut qty_to_fill: Quantity, mut on_event: F) -> Quantity
+    where F: FnMut(MatchEvent) {
+        let start_qty = qty_to_fill.0;
+        while qty_to_fill.0 > 0 {
+            if let Some(mut book_order) = self.orders.pop_front() {
+                let match_amount = std::cmp::min(qty_to_fill.0, book_order.size.0);
+                book_order.size.0 -= match_amount;
+                qty_to_fill.0 -= match_amount;
+
+                on_event(MatchEvent::Trade {
+                    maker_id: book_order.id, taker_id, price: self.price, qty: Quantity(match_amount),
+                });
+
+                if book_order.size.0 > 0 { self.orders.push_front(book_order); }
+            } else { break; }
+        }
+        Quantity(start_qty - qty_to_fill.0)
+    }
+}
+
+#[derive(Debug)]
+pub struct Orderbook {
+    asks: BTreeMap<Price, Limit>,
+    bids: BTreeMap<Price, Limit>,
+    next_order_id: OrderId,
+}
+
+impl Orderbook {
+    pub fn new() -> Self {
+        Self { asks: BTreeMap::new(), bids: BTreeMap::new(), next_order_id: OrderId(1) }
+    }
+
+    pub fn execute_limit_order<F>(&mut self, side: Side, price: Price, qty: Quantity, mut on_event: F)
+    where F: FnMut(MatchEvent) {
+        let taker_order_id = self.next_order_id;
+        self.next_order_id.0 += 1;
+        let mut remaining_qty = qty;
+        let mut prices_to_remove = [Price(0); 8];
+        let mut remove_count = 0;
+
+        match side {
+            Side::Bid => {
+                for (&ask_price, limit) in self.asks.iter_mut() {
+                    if ask_price > price || remaining_qty.0 == 0 { break; }
+                    let matched = limit.fill(taker_order_id, remaining_qty, &mut on_event);
+                    remaining_qty.0 -= matched.0;
+                    if limit.is_empty() && remove_count < 8 {
+                        prices_to_remove[remove_count] = ask_price;
+                        remove_count += 1;
+                    }
+                }
+                for i in 0..remove_count { self.asks.remove(&prices_to_remove[i]); }
             }
-            MatchEvent::Maker {
-                id,
-                price,
-                qty,
-                side,
-            } => {
-                println!(
-                    "   \u{1F4DD} ORDER PLACED: Order #{} ({:?}) is now resting in book -> {} units @ ${}",
-                    id, side, qty, price
-                );
+            Side::Ask => {
+                for (&bid_price, limit) in self.bids.iter_mut().rev() {
+                    if bid_price < price || remaining_qty.0 == 0 { break; }
+                    let matched = limit.fill(taker_order_id, remaining_qty, &mut on_event);
+                    remaining_qty.0 -= matched.0;
+                    if limit.is_empty() && remove_count < 8 {
+                        prices_to_remove[remove_count] = bid_price;
+                        remove_count += 1;
+                    }
+                }
+                for i in 0..remove_count { self.bids.remove(&prices_to_remove[i]); }
             }
         }
+
+        if remaining_qty.0 > 0 {
+            on_event(MatchEvent::Maker { id: taker_order_id, price, qty: remaining_qty, side });
+            let target_map = match side { Side::Bid => &mut self.bids, Side::Ask => &mut self.asks };
+            target_map.entry(price).or_insert_with(|| Limit::new(price))
+                .orders.push_back(Order { id: taker_order_id, size: remaining_qty, side });
+        }
     }
+}
+
+fn main() {
+    let mut ob = Orderbook::new();
+
+    ob.execute_limit_order(Side::Ask, Price(100), Quantity(10), |event| {
+        println!("Setup Event: {:?}", event);
+    });
+
+    println!("--- Executing aggressive Bid ---");
+
+    ob.execute_limit_order(Side::Bid, Price(100), Quantity(5), |event| {
+        match event {
+            MatchEvent::Trade { maker_id, taker_id, price, qty } => {
+                println!(
+                    "TRADE! Taker {} matched with Maker {} for {} units at ${}",
+                    taker_id.0, maker_id.0, qty.0, price.0
+                );
+            }
+            MatchEvent::Maker { .. } => {
+                println!("Order added to book.");
+            }
+        }
+    });
 }

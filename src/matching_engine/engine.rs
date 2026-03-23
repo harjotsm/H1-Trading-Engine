@@ -1,48 +1,103 @@
-use super::orderbook::{BidOrAsk, MatchResult, Orderbook};
+use super::orderbook::{MatchEvent, Orderbook, Price, Quantity, Side};
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
+use std::fmt;
 
+// Zero-Cost Identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MarketId(pub u32);
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+/// A zero-allocation representation of a ticker symbol (up to 8 characters).
+/// This keeps `TradingPair` exactly 16 bytes and entirely on the stack.
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+pub struct Ticker(pub [u8; 8]);
+
+impl Ticker {
+    /// Creates a new Ticker from a string slice, padding with null bytes.
+    pub fn new(s: &str) -> Self {
+        let mut bytes = [0u8; 8];
+        let len = s.len().min(8);
+        bytes[..len].copy_from_slice(&s.as_bytes()[..len]);
+        Self(bytes)
+    }
+
+    /// Safely extracts the valid UTF-8 string portion for printing
+    pub fn as_str(&self) -> &str {
+        let len = self.0.iter().position(|&c| c == 0).unwrap_or(8);
+        std::str::from_utf8(&self.0[..len]).unwrap_or("INVALID")
+    }
+}
+
+impl fmt::Display for Ticker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 pub struct TradingPair {
-    base: String,
-    quote: String,
+    base: Ticker,
+    quote: Ticker,
 }
 
 impl TradingPair {
-    pub fn new(base: String, quote: String) -> TradingPair {
-        TradingPair { base, quote }
-    }
-
-    pub fn to_string(&self) -> String {
-        format!("{}_{}", self.base, self.quote)
+    pub fn new(base: &str, quote: &str) -> Self {
+        Self {
+            base: Ticker::new(base),
+            quote: Ticker::new(quote),
+        }
     }
 }
 
+// Idiomatic way to handle string conversion in Rust
+impl fmt::Display for TradingPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}_{}", self.base, self.quote)
+    }
+}
+
+// Zero-Allocation Error Handling
+#[derive(Debug, PartialEq, Eq)]
+pub enum EngineError {
+    MarketNotFound(MarketId),
+    MarketAlreadyExists,
+}
+
+impl fmt::Display for EngineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EngineError::MarketNotFound(id) => write!(f, "Market ID {} does not exist", id.0),
+            EngineError::MarketAlreadyExists => write!(f, "Market already exists"),
+        }
+    }
+}
+impl std::error::Error for EngineError {}
+
+// The Engine
 pub struct MatchingEngine {
     orderbooks: FxHashMap<MarketId, Orderbook>,
-    pair_to_id: HashMap<TradingPair, MarketId>,
+    pair_to_id: FxHashMap<TradingPair, MarketId>,
+    next_market_id: u32,
 }
 
 impl MatchingEngine {
-    pub fn new() -> MatchingEngine {
-        MatchingEngine {
-            orderbooks: FxHashMap::with_capacity_and_hasher(1024, Default::default()),
-            pair_to_id: HashMap::with_capacity(1024),
+    pub fn new() -> Self {
+        Self {
+            orderbooks: FxHashMap::default(),
+            pair_to_id: FxHashMap::default(),
+            next_market_id: 1, // Start at 1 (0 is often used as a null/invalid ID in binary protocols)
         }
     }
 
     pub fn add_new_market(&mut self, pair: TradingPair) -> MarketId {
         if let Some(&id) = self.pair_to_id.get(&pair) {
-            println!("Market already exists: {:?}", pair.to_string());
+            println!("Market already exists: {}", pair);
             return id;
         }
 
-        let id = MarketId(self.orderbooks.len() as u32);
+        let id = MarketId(self.next_market_id);
+        self.next_market_id += 1;
 
-        println!("Added new market: {:?} with ID {:?}", pair.to_string(), id);
+        println!("Added new market: {} with ID {}", pair, id.0);
 
         self.orderbooks.insert(id, Orderbook::new());
         self.pair_to_id.insert(pair, id);
@@ -50,19 +105,27 @@ impl MatchingEngine {
         id
     }
 
-    pub fn place_limit_order(
+    /// Now takes a closure to route events immediately
+    pub fn place_limit_order<F>(
         &mut self,
         market_id: MarketId,
-        side: BidOrAsk,
-        price: u64,
-        qty: u64,
-    ) -> Result<MatchResult, String> {
-        match self.orderbooks.get_mut(&market_id) {
-            Some(orderbook) => {
-                let result = orderbook.execute_limit_order(side, price, qty);
-                Ok(result)
-            }
-            None => Err(format!("Market ID {:?} does not exist", market_id)),
-        }
+        side: Side,
+        price: Price,
+        qty: Quantity,
+        on_event: F,
+    ) -> Result<(), EngineError>
+    where
+        F: FnMut(MatchEvent),
+    {
+        // Using `ok_or` avoids allocating an error string, returning our fast enum
+        let orderbook = self
+            .orderbooks
+            .get_mut(&market_id)
+            .ok_or(EngineError::MarketNotFound(market_id))?;
+
+        // Pass the closure straight down into the execution engine
+        orderbook.execute_limit_order(side, price, qty, on_event);
+        
+        Ok(())
     }
 }

@@ -1,37 +1,52 @@
-use H1_Trading_Engine::matching_engine::engine::{MatchingEngine, TradingPair};
-use H1_Trading_Engine::matching_engine::orderbook::BidOrAsk;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
 use rand::Rng;
-use std::hint::black_box;
+
+use H1_Trading_Engine::matching_engine::engine::{MatchingEngine, TradingPair};
+use H1_Trading_Engine::matching_engine::orderbook::{Price, Quantity, Side};
 
 fn benchmark_placing_orders(c: &mut Criterion) {
     let mut group = c.benchmark_group("Orderbook Throughput");
-    group.sample_size(50);
+    group.sample_size(50); 
 
-    group.bench_function("place_random_orders", |b| {
-        let mut engine = MatchingEngine::new();
-        let pair = TradingPair::new("BTC".to_string(), "USD".to_string());
-        let market_id = engine.add_new_market(pair);
-
+    group.bench_function("place_1000_random_orders", |b| {
         let mut rng = rand::rng();
-        let orders: Vec<(BidOrAsk, u64, u64)> = (0..1000)
+        
+        // Pre-generate the workload outside the timed loop
+        let orders: Vec<(Side, Price, Quantity)> = (0..1000)
             .map(|_| {
                 let side = if rng.random_bool(0.5) {
-                    BidOrAsk::Bid
+                    Side::Bid
                 } else {
-                    BidOrAsk::Ask
+                    Side::Ask
                 };
-                let price = rng.random_range(100..200);
-                let qty = rng.random_range(1..10);
+                let price = Price(rng.random_range(100..200));
+                let qty = Quantity(rng.random_range(1..10));
                 (side, price, qty)
             })
             .collect();
 
-        b.iter(|| {
-            for (side, price, qty) in &orders {
-                let _ = black_box(engine.place_limit_order(market_id, *side, *price, *qty));
-            }
-        });
+        // iter_batched to prevent state accumulation
+        b.iter_batched(
+            || {
+                // create a fresh engine for every single iteration.
+                let mut engine = MatchingEngine::new();
+                let pair = TradingPair::new("BTC", "USD"); 
+                let market_id = engine.add_new_market(pair);
+                (engine, market_id)
+            },
+            |(mut engine, market_id)| {
+                // EXECUTION PHASE: This IS timed.
+                for (side, price, qty) in &orders {
+                    // Pipe events into the black_box so the compiler doesn't optimize 
+                    // the execution loop away entirely.
+                    let _ = engine.place_limit_order(market_id, *side, *price, *qty, |event| {
+                        black_box(event); 
+                    });
+                }
+            },
+            // Tells Criterion how to manage the setup memory
+            BatchSize::SmallInput, 
+        );
     });
 
     group.finish();
