@@ -17,13 +17,12 @@ Performance is continuously measured using `criterion` to prevent regressions an
 
 The engine maintains a tight execution profile. The histogram below demonstrates the latency distribution for processing a batch of 1,000 randomized Limit Orders (Bids and Asks), highlighting the absence of heavy outliers caused by garbage collection or allocation pauses.
 
-*(Note: Replace with your actual Criterion histogram screenshot)*
+![Criterion Latency Distribution Histogram](image.png)
 
 ### CPU Execution Profile
 
 To ensure the OS scheduler and memory allocator do not interrupt the execution loop, the system is profiled using `cargo-flamegraph` (xctrace/perf). The flamegraph below visually confirms that the vast majority of CPU cycles are spent inside the core `execute_limit_order` and `limit.fill` logic, without hidden dynamic allocation overhead.
 
-![Criterion Latency Distribution Histogram](image.png)
 
 ## Getting Started
 
