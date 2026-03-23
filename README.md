@@ -25,6 +25,15 @@ To ensure the OS scheduler and memory allocator do not interrupt the execution l
 
 ![CPU Flamegraph](flamegraph.svg)
 
+### Engine Evolution: Zero-Allocation Refactor
+
+The current iteration of the engine introduces several critical system-level optimizations over the previous V1 architecture:
+* Eliminated Heap Allocations: The hot path no longer allocates memory. We replaced the pattern of building and returning Vec<MatchEvent> with a zero-allocation closure/callback pattern.
+* Stack-Allocated Tickers: Replaced dynamic String allocations for trading pairs (e.g., "BTC_USD") with a 16-byte, entirely stack-allocated Ticker([u8; 8]) struct.
+* Strict Type Safety: Migrated from primitive u64 fields to zero-cost Newtypes (Price, Quantity, OrderId) to prevent cross-assignment bugs at compile time.
+* Faster Hashing: Swapped the standard library's cryptographically secure HashMap (SipHash) for FxHashMap (rustc-hash) to achieve ultra-fast O(1) routing lookups.
+* Zero-Cost Errors: Replaced heap-allocated String error messages with a lightweight EngineError enum.
+
 ## Getting Started
 
 ### Prerequisites
