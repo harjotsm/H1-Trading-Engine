@@ -23,6 +23,7 @@ The engine maintains a tight execution profile. The histogram below demonstrates
 
 To ensure the OS scheduler and memory allocator do not interrupt the execution loop, the system is profiled using `cargo-flamegraph` (xctrace/perf). The flamegraph below visually confirms that the vast majority of CPU cycles are spent inside the core `execute_limit_order` and `limit.fill` logic, without hidden dynamic allocation overhead.
 
+![CPU Flamegraph](flamegraph.svg)
 
 ## Getting Started
 
