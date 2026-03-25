@@ -1,4 +1,4 @@
-# H1-Trading-Engine
+# H1-Matching-Engine
 
 A high-performance, zero-allocation order matching engine written in Rust. Designed for low-latency financial environments, this engine prioritizes deterministic execution, cache locality, and strict type safety.
 
